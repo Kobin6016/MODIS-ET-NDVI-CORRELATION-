@@ -1,0 +1,94 @@
+// =================== Step 1: Define AOI ===================
+var roi = ee.FeatureCollection('projects/ee-kobinaamens/assets/MCS');
+Map.centerObject(roi, 7);
+Map.addLayer(roi, {color: 'red'}, 'ROI');
+
+// =================== Step 2: Define Time Range ===================
+var startYear = 2000;
+var endYear = 2024;
+
+// =================== Step 3: Import and Process NDVI ===================
+var ndviCollection = ee.ImageCollection("MODIS/061/MOD13A1")
+  .select("NDVI")
+  .map(function(image){
+    return image.clip(roi)
+                .multiply(0.0001)
+                .copyProperties(image, ["system:time_start"]);
+  });
+
+// =================== Step 4: Import and Process ET ===================
+var etCollection = ee.ImageCollection("MODIS/061/MOD16A2GF")
+  .select("ET")
+  .map(function(image){
+    return image.clip(roi)
+                .multiply(0.1)  // scale factor
+                .copyProperties(image, ["system:time_start"]);
+  });
+
+// =================== Step 5: Calculate Yearly Mean ===================
+var years = ee.List.sequence(startYear, endYear);
+
+var ndviYearly = ee.FeatureCollection(
+  years.map(function(year){
+    var start = ee.Date.fromYMD(year, 1, 1);
+    var end = ee.Date.fromYMD(year, 12, 31);
+    var mean = ndviCollection.filterDate(start, end)
+      .mean()
+      .reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: roi,
+        scale: 500,
+        maxPixels: 1e13
+      }).get("NDVI");
+    return ee.Feature(null, {'year': year, 'NDVI': mean});
+  })
+);
+
+var etYearly = ee.FeatureCollection(
+  years.map(function(year){
+    var start = ee.Date.fromYMD(year, 1, 1);
+    var end = ee.Date.fromYMD(year, 12, 31);
+    var mean = etCollection.filterDate(start, end)
+      .mean()
+      .reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: roi,
+        scale: 500,
+        maxPixels: 1e13
+      }).get("ET");
+    return ee.Feature(null, {'year': year, 'ET': mean});
+  })
+);
+
+// =================== Step 6: Join NDVI and ET by Year ===================
+var joined = ndviYearly.map(function(feature){
+  var year = feature.get('year');
+  var matchingET = etYearly.filter(ee.Filter.eq('year', year)).first();
+  return feature.set('ET', matchingET.get('ET'));
+});
+
+// =================== Step 7: Scatter Plot with Trendline ===================
+var chart = ui.Chart.feature.byFeature(joined, 'NDVI', ['ET'])
+  .setChartType('ScatterChart')
+  .setOptions({
+    title: 'Correlation between NDVI and ET (2000–2024)',
+    hAxis: {title: 'NDVI'},
+    vAxis: {title: 'Evapotranspiration (mm/year)'},
+    pointSize: 5,
+    trendlines: {0: {
+      type: 'linear',
+      color: 'green',
+      lineWidth: 2,
+      opacity: 0.7,
+      showR2: true,
+      visibleInLegend: true
+    }}
+  });
+print(chart);
+
+// =================== Step 8: Export Data ===================
+Export.table.toDrive({
+  collection: joined,
+  description: 'Yearly_NDVI_ET_Correlation',
+  fileFormat: 'CSV'
+});
